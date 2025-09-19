@@ -42,10 +42,14 @@ try:
     creds_dict = json.loads(GOOGLE_CREDS)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     gclient = gspread.authorize(creds)
-    sheet = gclient.open_by_key(SHEET_KEY).sheet1  # 기본은 1번째 시트
 except Exception as e:
     print("❌ 구글 스프레드시트 인증/접속 실패:", e)
     sys.exit(1)
+
+# 🔧 시트 핸들러 유틸 (누락 보완)
+def ws(title: str):
+    """같은 문서 내 워크시트 핸들러"""
+    return gclient.open_by_key(SHEET_KEY).worksheet(title)
 
 # 🧰 유틸
 def now_kst_str(fmt="%Y-%m-%d %H:%M:%S"):
@@ -56,7 +60,7 @@ DICE_EMOJI = {
     4: "🎲4", 5: "🎲5", 6: "🎲6"
 }
 
-# 다중 이름 파서: 공백/쉼표 섞여도 처리
+# 다중 이름 파서: 공백/쉼표 섞여도 처리 (기존 사용처 유지)
 def _parse_names_and_amount(args):
     """
     args 예: ("홍길동","김철수","5")  또는 ("홍길동,김철수","5")
@@ -89,10 +93,9 @@ def _parse_names_and_amount(args):
 async def on_ready():
     print(f'✅ Logged in as {bot.user} ({bot.user.id})')
 
-@bot.command(name="접속", help="현재 봇이 정상 작동 중인지 확인합니다. 만약 봇이 응답하지 않으면 접속 오류입니다. 예) !접속")
+@bot.command(name="접속", help="현재 봇이 정상 작동 중인지 확인합니다. 예) !접속")
 async def 접속(ctx):
-    timestamp = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-    await ctx.send(f"현재 봇이 구동 중입니다.\n{timestamp}")
+    await ctx.send(f"현재 봇이 구동 중입니다.\n{now_kst_str()}")
 
 # ✅ 연결 테스트용 커맨드 (원하면 삭제 가능)
 @bot.command(name="시트테스트", help="연결 확인 시트의 A1에 현재 시간을 기록하고 값을 확인합니다. 예) !시트테스트")
@@ -105,8 +108,7 @@ async def 시트테스트(ctx):
     except Exception as e:
         await ctx.send(f"❌ 시트 접근 실패: {e}")
 
-  # ✅ 다이스 버튼
-
+# ✅ 다이스 버튼
 class DiceButton(Button):
     def __init__(self, sides: int, style: discord.ButtonStyle, owner_id: int):
         super().__init__(label=f"1d{sides}", style=style)
@@ -122,9 +124,8 @@ class DiceButton(Button):
             return
 
         roll = random.randint(1, self.sides)
-        timestamp = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
         await interaction.response.send_message(
-            f"{interaction.user.mention}의 **1d{self.sides}** 결과: **{roll}**\n{timestamp}"
+            f"{interaction.user.mention}의 **1d{self.sides}** 결과: **{roll}**\n{now_kst_str()}"
         )
 
 class DiceView(View):
@@ -152,16 +153,24 @@ async def 다이스(ctx):
     msg = await ctx.send(f"{ctx.author.mention} 굴릴 주사위를 선택하세요:", view=view)
     view.message = msg
 
-# ===== 군번(72******) 부여 =====
+# ─────────────────────────────────────────────────────────
+# ✅ 추가: !군번 / !추첨 / !랜덤 (통일된 [결과] 포맷)
+# ─────────────────────────────────────────────────────────
 
+def mark_last_editor(sh, ctx):
+    """해당 워크시트 sh에 최종 수정자 이름을 D2에 기록 (실패 무시)"""
+    try:
+        sh.update_acell("D2", getattr(ctx.author, "display_name", "unknown"))
+    except Exception as e:
+        print(f"[WARN] D2 갱신 실패: {e}")
+
+# ───── 군번 유틸 ─────
 def _gunbeon_existing_set(sh):
-    """'군번' 시트 D열의 기존 군번 집합 반환 (공백/NULL 제외)"""
     vals = sh.col_values(4)  # D열 전체
     return {v.strip() for v in vals if v and v.strip()}
 
-def _gen_unique_gunbeon(existing_ids: set) -> str | None:
-    """기존 집합과 중복되지 않는 72****** 군번 생성. 실패 시 None."""
-    for _ in range(200):  # 여유롭게 재시도
+def _gen_unique_gunbeon(existing_ids: set, max_tries: int = 2000) -> str | None:
+    for _ in range(max_tries):
         candidate = f"72{random.randint(0, 999999):06d}"
         if candidate not in existing_ids:
             return candidate
@@ -169,40 +178,112 @@ def _gen_unique_gunbeon(existing_ids: set) -> str | None:
 
 @bot.command(
     name="군번",
-    help="!군번 이름 → '군번' 시트 B열에서 이름을 찾아 D열에 고유 군번(72******)을 자동 기입합니다."
+    help="!군번 이름 [강제|--force|force|재발급] → '군번' 시트 B열에서 이름을 찾아 D열에 고유 군번(72******)을 기입합니다."
 )
-async def 군번(ctx, 이름: str):
+async def 군번(ctx, 이름: str, 옵션: str = ""):
     try:
         sh = ws("군번")
+        row = None
+        # B열에서 정확 일치
+        col_vals = sh.col_values(2)
+        tgt = (이름 or "").strip()
+        for idx, val in enumerate(col_vals, start=1):
+            if (val or "").strip() == tgt:
+                row = idx
+                break
 
-        # 이름 행 찾기 (B열)
-        row = find_row_by_name(sh, 이름, name_col=2)
         if not row:
-            await ctx.send(f"❌ '군번' 시트 B열에서 '{이름}'을(를) 찾지 못했습니다.")
+            await ctx.send(f"[결과]\n❌ '군번' 시트 B열에서 '{이름}'을(를) 찾지 못했습니다.\n{now_kst_str()}")
             return
 
-        # 이미 군번이 있으면 재부여하지 않음
         current = (sh.cell(row, 4).value or "").strip()  # D열
-        if current:
-            timestamp = now_kst_str()
-            await ctx.send(f"ℹ️ '{이름}'은(는) 이미 군번 `{current}`가 있습니다. 변경하지 않았습니다.\n{timestamp}")
+        force = (옵션 or "").strip().lower() in {"강제", "--force", "force", "재발급"}
+
+        if current and not force:
+            await ctx.send(f"[결과]\nℹ️ '{이름}'은(는) 이미 군번 `{current}`가 있습니다.\n{now_kst_str()}")
             return
 
-        # 중복 방지용 기존 집합 수집 후 생성
         existing = _gunbeon_existing_set(sh)
+        if current in existing:
+            existing.remove(current)
+
         new_id = _gen_unique_gunbeon(existing)
         if not new_id:
-            await ctx.send("❌ 군번 생성 실패: 고유 번호 생성에 연속으로 실패했습니다. 다시 시도해 주세요.")
+            await ctx.send(f"[결과]\n❌ 군번 생성 실패: 잠시 후 다시 시도해 주세요.\n{now_kst_str()}")
             return
 
-        # 기입
-        sh.update_cell(row, 4, new_id)  # D열에 기록
+        sh.update_cell(row, 4, new_id)  # D열 기입
         mark_last_editor(sh, ctx)
 
-        timestamp = now_kst_str()
-        await ctx.send(f"✅ '{이름}'에게 군번 `{new_id}` 부여 완료.\n{timestamp}")
+        if force and current:
+            await ctx.send(f"[결과]\n✅ '{이름}' 군번 재발급 완료: `{current}` → `{new_id}`\n{now_kst_str()}")
+        else:
+            await ctx.send(f"[결과]\n✅ '{이름}'에게 군번 `{new_id}` 부여 완료.\n{now_kst_str()}")
 
     except Exception as e:
-        await ctx.send(f"❌ 군번 처리 실패: {e}")
+        await ctx.send(f"[결과]\n❌ 군번 처리 실패: {e}\n{now_kst_str()}")
 
-  bot.run(DISCORD_TOKEN)
+@bot.command(name="추첨", help="!추첨 숫자 → '칩' 시트 B6 이후 이름 중에서 무작위 추첨")
+async def 추첨(ctx, 숫자: str):
+    if not 숫자.isdigit():
+        await ctx.send(f"[결과]\n⚠️ 숫자를 입력하세요. 예) `!추첨 3`\n{now_kst_str()}")
+        return
+    k = int(숫자)
+    if k <= 0:
+        await ctx.send(f"[결과]\n⚠️ 1 이상의 숫자를 입력하세요.\n{now_kst_str()}")
+        return
+    try:
+        sh = ws("칩")
+        colB = sh.col_values(2)
+        candidates = [v.strip() for v in colB[5:] if v and v.strip()]  # B6~
+        total = len(candidates)
+        if total == 0:
+            await ctx.send(f"[결과]\n⚠️ 추첨 대상이 없습니다. (B6 이후가 비어 있음)\n{now_kst_str()}")
+            return
+        if k > total:
+            await ctx.send(f"[결과]\n⚠️ 추첨 인원이 대상 수({total}명)를 초과합니다.\n{now_kst_str()}")
+            return
+        winners = random.sample(candidates, k)
+        await ctx.send(f"[결과]\n추첨 결과 ({k}명): {', '.join(winners)}\n{now_kst_str()}")
+    except Exception as e:
+        await ctx.send(f"[결과]\n❌ 추첨 실패: {e}\n{now_kst_str()}")
+
+def _parse_names_and_k_for_random(args):
+    if len(args) < 2:
+        return None, "⚠️ 최소 1명 이상의 이름과 추첨 인원 수를 입력하세요."
+    k_str = args[-1]
+    if not k_str.isdigit():
+        return None, "⚠️ 추첨 인원 수는 정수여야 합니다."
+    k = int(k_str)
+    if k <= 0:
+        return None, "⚠️ 추첨 인원 수는 1 이상이어야 합니다."
+    raw_names = args[:-1]
+    names = []
+    for token in raw_names:
+        for part in token.split(","):
+            nm = part.strip()
+            if nm:
+                names.append(nm)
+    names = list(dict.fromkeys(names))  # 중복 제거
+    return (names, k), None
+
+@bot.command(
+    name="랜덤",
+    help="!랜덤 이름1 이름2 ... k → 입력한 이름 중 서로 다른 k명을 무작위로 뽑습니다."
+)
+async def 랜덤(ctx, *args):
+    parsed, err = _parse_names_and_k_for_random(args)
+    if err:
+        await ctx.send(f"[결과]\n{err}\n{now_kst_str()}")
+        return
+    names, k = parsed
+    n = len(names)
+    if k > n:
+        k = n
+    winners = random.sample(names, k)
+    await ctx.send(f"[결과]\n랜덤 선택 ({k}명): {', '.join(winners)}\n{now_kst_str()}")
+
+# ─────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
