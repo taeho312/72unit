@@ -157,51 +157,39 @@ async def 다이스(ctx):
 # ✅ 추가: !군번 / !추첨 / !랜덤 (통일된 [결과] 포맷)
 # ─────────────────────────────────────────────────────────
 
+# ===== 군번(72******) 부여/재발급 — 수식 제거 + 텍스트 고정 =====
+import re
+
 def _find_row_by_exact_name_colB(sh, target: str) -> int | None:
-    """
-    B열에서 2행부터 '정확 일치' 행 반환. (헤더 절대 제외)
-    """
+    """'군번' 시트 B열에서 2행부터 '정확 일치' 행 번호 반환(헤더 제외)."""
     tgt = (target or "").strip()
     if not tgt:
         return None
-    # 1차: 정규식 정확일치로 빠르게
+    # 1) 정규식 정확일치로 시도
     try:
         cell = sh.find(f"^{re.escape(tgt)}$", in_column=2, case_sensitive=True, regex=True)
         if cell and cell.row >= 2:
             return cell.row
     except Exception:
         pass
-    # 2차: 수동 스캔 (2행부터)
+    # 2) 수동 스캔 (2행부터)
     col_vals = sh.col_values(2)
-    for idx, val in enumerate(col_vals[1:], start=2):  # 2행부터
+    for idx, val in enumerate(col_vals[1:], start=2):
         if (val or "").strip() == tgt:
             return idx
     return None
 
-def _ensure_colD_is_text(doc_id: str, worksheet_id: int):
-    """
-    해당 워크시트의 D열 전체를 TEXT 서식으로 강제.
-    (시트가 숫자/전화번호로 오인해 변환하는 것 방지)
-    """
-    ss = gclient.open_by_key(doc_id)
-    body = {
-        "requests": [{
-            "repeatCell": {
-                "range": {
-                    "sheetId": worksheet_id,
-                    "startColumnIndex": 3,  # D열(0-based)
-                    "endColumnIndex": 4
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "numberFormat": { "type": "TEXT" }
-                    }
-                },
-                "fields": "userEnteredFormat.numberFormat"
-            }
-        }]
-    }
-    ss.batch_update(body)
+def _gunbeon_existing_set(sh):
+    """D열 기존 군번(공백 제외) 집합."""
+    return {v.strip() for v in sh.col_values(4) if v and v.strip()}
+
+def _gen_unique_gunbeon(existing: set, max_tries=2000) -> str | None:
+    """기존과 중복되지 않는 72****** 생성."""
+    for _ in range(max_tries):
+        cand = f"72{random.randint(0, 999999):06d}"
+        if cand not in existing:
+            return cand
+    return None
 
 @bot.command(
     name="군번",
@@ -210,57 +198,95 @@ def _ensure_colD_is_text(doc_id: str, worksheet_id: int):
 async def 군번(ctx, 이름: str, 옵션: str = ""):
     try:
         sh = ws("군번")
-        # 워크시트 ID 확보 (열 서식 적용에 필요)
-        doc = gclient.open_by_key(SHEET_KEY)
-        target_ws = doc.worksheet("군번")
-        sheet_id = target_ws._properties.get("sheetId")
-
-        # 1) B열에서 2행부터 정확 일치로 찾기
         row = _find_row_by_exact_name_colB(sh, 이름)
-        if not row or row < 2:
+        if not row:
             await ctx.send(f"[결과]\n❌ '군번' 시트 B열에서 '{이름}'을(를) 찾지 못했습니다.\n{now_kst_str()}")
             return
 
-        # 2) 강제 재발급 여부
-        current = (sh.cell(row, 4).value or "").strip()
+        current = (sh.cell(row, 4).value or "").strip()   # D열 현재 값
         force = (옵션 or "").strip().lower() in {"강제", "--force", "force", "재발급"}
         if current and not force:
             await ctx.send(f"[결과]\nℹ️ '{이름}'은(는) 이미 군번 `{current}`가 있습니다.\n{now_kst_str()}")
             return
 
-        # 3) 중복 방지용 집합
-        vals = sh.col_values(4)
-        existing = {v.strip() for v in vals if v and v.strip()}
+        # 중복 방지 집합 준비
+        existing = _gunbeon_existing_set(sh)
         if current in existing:
             existing.remove(current)
 
-        # 4) 새 번호 생성
-        for _ in range(2000):
-            new_id = f"72{random.randint(0, 999999):06d}"
-            if new_id not in existing:
-                break
-        else:
+        new_id = _gen_unique_gunbeon(existing)
+        if not new_id:
             await ctx.send(f"[결과]\n❌ 군번 생성 실패: 잠시 후 다시 시도해 주세요.\n{now_kst_str()}")
             return
 
-        # 5) D열 텍스트 서식 강제(한번만 적용해두면 이후에도 안전)
+        # ===== 핵심: 해당 D{row} 셀의 수식을 제거하고 TEXT 형식으로 값을 '고정' =====
+        doc = gclient.open_by_key(SHEET_KEY)
+        ws_obj = doc.worksheet("군번")
+        sheet_id = ws_obj._properties.get("sheetId")
+
+        requests = []
+
+        # (A) D열 전체를 TEXT 포맷으로 고정 (자동 숫자/전화번호 변환 방지)
         if sheet_id is not None:
-            try:
-                _ensure_colD_is_text(SHEET_KEY, sheet_id)
-            except Exception as e:
-                # 서식 적용 실패는 치명적이지 않으니 경고만
-                print(f"[WARN] D열 TEXT 서식 적용 실패: {e}")
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startColumnIndex": 3,  # D (0-based)
+                        "endColumnIndex": 4
+                    },
+                    "cell": {
+                        "userEnteredFormat": {"numberFormat": {"type": "TEXT"}}
+                    },
+                    "fields": "userEnteredFormat.numberFormat"
+                }
+            })
 
-        # 6) RAW로 정확히 기록 (수식/자동변환 방지)
-        sh.update(f"D{row}", [[new_id]], value_input_option="RAW")
+            # (B) 대상 셀(D{row})의 기존 수식/값 제거
+            requests.append({
+                "updateCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": 3,
+                        "endColumnIndex": 4
+                    },
+                    "fields": "userEnteredValue"
+                }
+            })
 
-        # 7) 최종 수정자 기록(실패 무시)
+            # (C) 대상 셀(D{row})에 텍스트로 값 쓰기
+            requests.append({
+                "updateCells": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": 3,
+                        "endColumnIndex": 4
+                    },
+                    "rows": [{
+                        "values": [{
+                            "userEnteredValue": {"stringValue": new_id}
+                        }]
+                    }],
+                    "fields": "userEnteredValue"
+                }
+            })
+
+            doc.batch_update({"requests": requests})
+        else:
+            # sheetId를 못얻은 예외적 상황: RAW로 직접 기록(대부분 충분)
+            sh.update(f"D{row}", [[new_id]], value_input_option="RAW")
+
+        # 최종 수정자 기록(실패 무시)
         try:
             sh.update_acell("D2", getattr(ctx.author, "display_name", "unknown"))
         except Exception as e:
             print(f"[WARN] D2 갱신 실패: {e}")
 
-        # 8) 응답
+        # 응답
         if force and current:
             await ctx.send(f"[결과]\n✅ '{이름}' 군번 재발급 완료: `{current}` → `{new_id}`\n{now_kst_str()}")
         else:
