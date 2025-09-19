@@ -295,7 +295,7 @@ async def 군번(ctx, 이름: str, 옵션: str = ""):
     except Exception as e:
         await ctx.send(f"[결과]\n❌ 군번 처리 실패: {e}\n{now_kst_str()}")
 
-@bot.command(name="추첨", help="!추첨 숫자 → '칩' 시트 B6 이후 이름 중에서 무작위 추첨")
+@bot.command(name="추첨", help="!추첨 숫자 → '군번' 시트 B6 이후 이름 중에서 무작위 추첨")
 async def 추첨(ctx, 숫자: str):
     if not 숫자.isdigit():
         await ctx.send(f"[결과]\n⚠️ 숫자를 입력하세요. 예) `!추첨 3`\n{now_kst_str()}")
@@ -305,7 +305,7 @@ async def 추첨(ctx, 숫자: str):
         await ctx.send(f"[결과]\n⚠️ 1 이상의 숫자를 입력하세요.\n{now_kst_str()}")
         return
     try:
-        sh = ws("칩")
+        sh = ws("군번")
         colB = sh.col_values(2)
         candidates = [v.strip() for v in colB[5:] if v and v.strip()]  # B6~
         total = len(candidates)
