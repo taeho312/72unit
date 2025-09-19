@@ -401,24 +401,53 @@ def _pick_daily_from_col(rows, col_i, seed_key: str):
     rnd = random.Random(f"{today_key}|{seed_key}|{len(pool)}")
     return rnd.choice(pool)
 
+def _normalize_name(s: str) -> str:
+    """공백/제로폭/유사문자 제거 및 NFKC 정규화"""
+    if s is None:
+        return ""
+    # 유니코드 정규화
+    s = unicodedata.normalize("NFKC", s)
+    # 제로폭 문자 제거
+    s = re.sub(r"[\u200B-\u200D\uFEFF]", "", s)
+    # 앞뒤 공백 + 연속 공백 단일화
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 def _find_row_by_name_in_gunbeon(name: str) -> int | None:
-    """'군번' 시트 B열(이름)에서 2행부터 정확 일치하는 행 번호 반환"""
+    """
+    '군번' 시트 B열(이름)에서 2행부터 '정규화 후' 정확 일치 검색.
+    - 1차: 정규화 정확 일치
+    - 2차: 정규화 부분 일치(후보가 1개일 때만 채택)
+    """
     sh = ws("군번")
+    tgt = _normalize_name(name)
+    if not tgt:
+        return None
+
     colB = sh.col_values(2)
-    tgt = (name or "").strip()
-    for idx, val in enumerate(colB[1:], start=2):  # 2행부터
-        if (val or "").strip() == tgt:
+    normB = [_normalize_name(v) for v in colB]  # 1행 포함
+
+    # 1차: 정확 일치 (2행부터)
+    for idx, v in enumerate(normB[1:], start=2):
+        if v == tgt:
             return idx
+
+    # 2차: 부분 일치(후보가 1개일 때만)
+    cand_rows = [i for i, v in enumerate(normB[1:], start=2) if v and (tgt in v or v in tgt)]
+    if len(cand_rows) == 1:
+        return cand_rows[0]
+
     return None
 
 def _get_rank_from_gunbeon(name: str) -> str:
-    """'군번' 시트에서 이름에 해당하는 C열(계급) 반환 (없으면 빈문자열)"""
+    """'군번' 시트에서 이름 행의 C열(계급) 반환 (없으면 빈문자열)"""
     sh = ws("군번")
     row = _find_row_by_name_in_gunbeon(name)
     if not row:
         return ""
     try:
-        return (sh.cell(row, 3).value or "").strip()  # C열 = 계급
+        # 스샷 기준: C열이 '계급'
+        return (sh.cell(row, 3).value or "").strip()
     except Exception:
         return ""
 
