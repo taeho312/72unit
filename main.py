@@ -496,7 +496,7 @@ class OverallButton(Button):
         except Exception as e:
             await interaction.response.send_message(
                 f"[결과]\n❌ 종합 운세 실패: {e}\n{now_kst_str()}",
-                ephemeral=True
+                ephemeral=False
             )
 
 class NameModal(discord.ui.Modal, title="개인 운세"):
@@ -521,7 +521,7 @@ class NameModal(discord.ui.Modal, title="개인 운세"):
             if not rank:
                 await interaction.response.send_message(
                     f"[결과]\n❌ '군번' 시트에서 '{name}'의 계급을 찾지 못했습니다.\n{now_kst_str()}",
-                    ephemeral=True
+                    ephemeral=False
                 )
                 return
 
@@ -541,11 +541,11 @@ class NameModal(discord.ui.Modal, title="개인 운세"):
                 f"행운의 아이템: {lucky}\n"
                 f"{now_kst_str()}"
             )
-            await interaction.response.send_message(msg, ephemeral=True)
+            await interaction.response.send_message(msg)
         except Exception as e:
             await interaction.response.send_message(
                 f"[결과]\n❌ 개인 운세 실패: {e}\n{now_kst_str()}",
-                ephemeral=True
+                ephemeral=False
             )
 
 class PersonalButton(Button):
@@ -558,7 +558,7 @@ class PersonalButton(Button):
         except Exception as e:
             await interaction.response.send_message(
                 f"[결과]\n❌ 입력창 표시 실패: {e}\n{now_kst_str()}",
-                ephemeral=True
+                ephemeral=False
             )
 
 # ── 명령어: !운세 ────────────────────────────────────────────────────
