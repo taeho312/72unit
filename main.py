@@ -9,8 +9,8 @@ import random
 import os
 import json
 import sys
-import re
 import asyncio
+import unicodedata, re
 
 KST = timezone(timedelta(hours=9))
 
