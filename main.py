@@ -282,9 +282,9 @@ async def 군번(ctx, 이름: str, 옵션: str = ""):
 
         # 최종 수정자 기록(실패 무시)
         try:
-            sh.update_acell("D2", getattr(ctx.author, "display_name", "unknown"))
+            sh.update_acell("I13", getattr(ctx.author, "display_name", "unknown"))
         except Exception as e:
-            print(f"[WARN] D2 갱신 실패: {e}")
+            print(f"[WARN] I13 갱신 실패: {e}")
 
         # 응답
         if force and current:
