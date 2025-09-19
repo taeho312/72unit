@@ -508,24 +508,24 @@ class NameModal(discord.ui.Modal, title="개인 운세"):
         self.add_item(self.name_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # ✅ 3초 제한 회피: 먼저 응답 예약(생각중 표시). 공개메시지로 보낼 땐 ephemeral=False
+        await interaction.response.defer(thinking=True, ephemeral=False)
+
         try:
             name = (self.name_input.value or "").strip()
             if not name:
-                await interaction.response.send_message(
-                    "[결과]\n⚠️ 이름을 입력하세요.\n" + now_kst_str(), ephemeral=True
-                )
+                await interaction.followup.send("[결과]\n⚠️ 이름을 입력하세요.\n" + now_kst_str())
                 return
 
-            # '군번' 시트에서 계급 조회
+            # 군번 시트에서 계급 조회
             rank = _get_rank_from_gunbeon(name)
             if not rank:
-                await interaction.response.send_message(
-                    f"[결과]\n❌ '군번' 시트에서 '{name}'의 계급을 찾지 못했습니다.\n{now_kst_str()}",
-                    ephemeral=False
+                await interaction.followup.send(
+                    f"[결과]\n❌ '군번' 시트에서 '{name}'의 계급을 찾지 못했습니다.\n{now_kst_str()}"
                 )
                 return
 
-            # '운세' 시트에서 하루 고정 랜덤(이름 포함 시드)
+            # 운세 시트에서 (이름+날짜 기준) 하루 고정 랜덤
             col, rows = _fortune_sheet_data()
             fortune = _pick_daily_from_col(rows, col["운세"],        f"{name}|fortune") or "데이터 없음"
             advice  = _pick_daily_from_col(rows, col["조언"],        f"{name}|advice")  or "데이터 없음"
@@ -541,12 +541,11 @@ class NameModal(discord.ui.Modal, title="개인 운세"):
                 f"행운의 아이템: {lucky}\n"
                 f"{now_kst_str()}"
             )
-            await interaction.response.send_message(msg)
+            await interaction.followup.send(msg)
+
         except Exception as e:
-            await interaction.response.send_message(
-                f"[결과]\n❌ 개인 운세 실패: {e}\n{now_kst_str()}",
-                ephemeral=False
-            )
+            # 에러도 followup으로 마무리
+            await interaction.followup.send(f"[결과]\n❌ 개인 운세 실패: {e}\n{now_kst_str()}")
 
 class PersonalButton(Button):
     def __init__(self):
