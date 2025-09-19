@@ -566,5 +566,44 @@ async def 운세(ctx):
     view = FortuneMenuView(owner_id=ctx.author.id)
     await ctx.send(f"{ctx.author.mention} 운세 메뉴를 선택하세요:", view=view)
 
+# ✅ 도움말
+
+# 기본 help 제거 (중복 방지)
+bot.remove_command("help")
+
+# 도움말 표기 고정(오버라이드) 사전
+HELP_OVERRIDES = {
+    "도움말":  "현재 사용 가능한 명령어 목록을 표시합니다.",
+    "접속":   "현재 봇이 정상 작동 중인지 확인합니다.",
+    "추첨":    "군번 시트 B6부터 마지막 행까지 이름 중에서 숫자만큼 무작위 추첨합니다. 예) !추첨 3",
+    "랜덤":    "쉼표 제외 입력한 이름 중 하나를 무작위로 출력합니다. 예) !랜덤 김철수 신짱구 훈이",
+    "다이스": "버튼으로 1d6/1d10/1d100을 굴립니다. 예) !다이스",
+    "운세":    "하루 한 번 운세를 확인합니다. 전체는 종합 운세를, 개인은 이름을 입력하여 개인의 운세를 볼 수 있습니다."
+}
+
+# 표기 순서 고정
+HELP_ORDER = ["도움말", "시트테스트", "추첨", "랜덤", "합계", "구매", "사용", "전체", "추가", "차감", "접속", "다이스", "전투"]
+
+@bot.command(name="도움말")
+async def 도움말(ctx):
+    # 현재 로드된 커맨드들
+    loaded = {cmd.name: cmd for cmd in bot.commands if not cmd.hidden}
+
+    # 우선 순서대로 정리 + 로드되지 않은 항목은 건너뜀
+    lines = ["**사용 가능한 명령어**\n"]
+    for name in HELP_ORDER:
+        if name in loaded:
+            desc = HELP_OVERRIDES.get(name) or (loaded[name].help or "설명 없음")
+            lines.append(f"**!{name}** — {desc}")
+
+    # HELP_ORDER에 없지만 로드된 커맨드가 더 있다면 뒤에 추가
+    for name, cmd in sorted(loaded.items()):
+        if name in HELP_ORDER:
+            continue
+        desc = HELP_OVERRIDES.get(name) or (cmd.help or "설명 없음")
+        lines.append(f"**!{name}** — {desc}")
+
+    await ctx.send(f"\n".join(lines))
+
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
