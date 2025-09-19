@@ -157,35 +157,51 @@ async def 다이스(ctx):
 # ✅ 추가: !군번 / !추첨 / !랜덤 (통일된 [결과] 포맷)
 # ─────────────────────────────────────────────────────────
 
-def mark_last_editor(sh, ctx):
-    """해당 워크시트 sh에 최종 수정자 이름을 D2에 기록 (실패 무시)"""
-    try:
-        sh.update_acell("D2", getattr(ctx.author, "display_name", "unknown"))
-    except Exception as e:
-        print(f"[WARN] D2 갱신 실패: {e}")
-
-# ───── 군번 유틸 ─────
 def _find_row_by_exact_name_colB(sh, target: str) -> int | None:
     """
-    '군번' 시트 B열에서 2행부터 '정확 일치'하는 행 번호 반환.
-    - 정규표현식 정확 일치 ^...$ 사용
-    - 1행(헤더)은 건너뜀
+    B열에서 2행부터 '정확 일치' 행 반환. (헤더 절대 제외)
     """
     tgt = (target or "").strip()
     if not tgt:
         return None
+    # 1차: 정규식 정확일치로 빠르게
     try:
-        # gspread의 find + 정규식 정확 일치. B열만 검색.
         cell = sh.find(f"^{re.escape(tgt)}$", in_column=2, case_sensitive=True, regex=True)
         if cell and cell.row >= 2:
             return cell.row
     except Exception:
-        # find 실패 시 수동 스캔 (fallback)
-        col_vals = sh.col_values(2)
-        for idx, val in enumerate(col_vals[1:], start=2):  # 2행부터
-            if (val or "").strip() == tgt:
-                return idx
+        pass
+    # 2차: 수동 스캔 (2행부터)
+    col_vals = sh.col_values(2)
+    for idx, val in enumerate(col_vals[1:], start=2):  # 2행부터
+        if (val or "").strip() == tgt:
+            return idx
     return None
+
+def _ensure_colD_is_text(doc_id: str, worksheet_id: int):
+    """
+    해당 워크시트의 D열 전체를 TEXT 서식으로 강제.
+    (시트가 숫자/전화번호로 오인해 변환하는 것 방지)
+    """
+    ss = gclient.open_by_key(doc_id)
+    body = {
+        "requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": worksheet_id,
+                    "startColumnIndex": 3,  # D열(0-based)
+                    "endColumnIndex": 4
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": { "type": "TEXT" }
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat"
+            }
+        }]
+    }
+    ss.batch_update(body)
 
 @bot.command(
     name="군번",
@@ -194,52 +210,57 @@ def _find_row_by_exact_name_colB(sh, target: str) -> int | None:
 async def 군번(ctx, 이름: str, 옵션: str = ""):
     try:
         sh = ws("군번")
+        # 워크시트 ID 확보 (열 서식 적용에 필요)
+        doc = gclient.open_by_key(SHEET_KEY)
+        target_ws = doc.worksheet("군번")
+        sheet_id = target_ws._properties.get("sheetId")
 
-        # 🔎 B열에서 2행부터 정확 일치로 찾기
+        # 1) B열에서 2행부터 정확 일치로 찾기
         row = _find_row_by_exact_name_colB(sh, 이름)
-        if not row:
+        if not row or row < 2:
             await ctx.send(f"[결과]\n❌ '군번' 시트 B열에서 '{이름}'을(를) 찾지 못했습니다.\n{now_kst_str()}")
             return
 
-        # 현재 값 확인 (D열=군번)
+        # 2) 강제 재발급 여부
         current = (sh.cell(row, 4).value or "").strip()
         force = (옵션 or "").strip().lower() in {"강제", "--force", "force", "재발급"}
-
         if current and not force:
             await ctx.send(f"[결과]\nℹ️ '{이름}'은(는) 이미 군번 `{current}`가 있습니다.\n{now_kst_str()}")
             return
 
-        # 중복 방지용 집합
-        def _gunbeon_existing_set(sheet):
-            vals = sheet.col_values(4)
-            return {v.strip() for v in vals if v and v.strip()}
-
-        def _gen_unique_gunbeon(existing_ids: set, max_tries: int = 2000) -> str | None:
-            for _ in range(max_tries):
-                cand = f"72{random.randint(0, 999999):06d}"
-                if cand not in existing_ids:
-                    return cand
-            return None
-
-        existing = _gunbeon_existing_set(sh)
+        # 3) 중복 방지용 집합
+        vals = sh.col_values(4)
+        existing = {v.strip() for v in vals if v and v.strip()}
         if current in existing:
             existing.remove(current)
 
-        new_id = _gen_unique_gunbeon(existing)
-        if not new_id:
+        # 4) 새 번호 생성
+        for _ in range(2000):
+            new_id = f"72{random.randint(0, 999999):06d}"
+            if new_id not in existing:
+                break
+        else:
             await ctx.send(f"[결과]\n❌ 군번 생성 실패: 잠시 후 다시 시도해 주세요.\n{now_kst_str()}")
             return
 
-        # ✍️ 텍스트로 고정하여 기록(숫자/전화번호 자동변환 방지)
-        # gspread update: 범위 업데이트로 USER_ENTERED 적용
-        sh.update(f"D{row}", [[f"'{new_id}"]])  # 앞의 ' 는 표시되진 않고 "텍스트로 입력" 처리됨
+        # 5) D열 텍스트 서식 강제(한번만 적용해두면 이후에도 안전)
+        if sheet_id is not None:
+            try:
+                _ensure_colD_is_text(SHEET_KEY, sheet_id)
+            except Exception as e:
+                # 서식 적용 실패는 치명적이지 않으니 경고만
+                print(f"[WARN] D열 TEXT 서식 적용 실패: {e}")
 
-        # 최종 수정자
+        # 6) RAW로 정확히 기록 (수식/자동변환 방지)
+        sh.update(f"D{row}", [[new_id]], value_input_option="RAW")
+
+        # 7) 최종 수정자 기록(실패 무시)
         try:
             sh.update_acell("D2", getattr(ctx.author, "display_name", "unknown"))
         except Exception as e:
             print(f"[WARN] D2 갱신 실패: {e}")
 
+        # 8) 응답
         if force and current:
             await ctx.send(f"[결과]\n✅ '{이름}' 군번 재발급 완료: `{current}` → `{new_id}`\n{now_kst_str()}")
         else:
