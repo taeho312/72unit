@@ -357,5 +357,186 @@ async def 랜덤(ctx, *args):
 
 # ─────────────────────────────────────────────────────────
 
+# ===== !운세: [종합](빨강) / [개인](파랑) ─ 시트 '운세', '군번' 연동 (KST 하루 고정, 전체 랭크 출력) =====
+from datetime import datetime
+import random
+from discord.ui import Button, View
+
+# ── KST 기준 '오늘' 키 (하루 고정에 사용) ─────────────────────────────
+def _today_kst_str():
+    return datetime.now(KST).date().strftime("%Y-%m-%d")
+
+# ── 시트 유틸 ─────────────────────────────────────────────────────────
+def _fortune_sheet_data():
+    """'운세' 시트: (헤더맵, 데이터행) 반환. 필수 열 검사."""
+    sh = ws("운세")
+    values = sh.get_all_values()
+    if not values:
+        raise RuntimeError("운세 시트가 비어 있습니다.")
+    header = [h.strip() for h in values[0]]
+    col_idx = {name: i for i, name in enumerate(header)}
+    for need in ("계급", "운세", "조언", "행운 아이템"):
+        if need not in col_idx:
+            raise RuntimeError(f"운세 시트에 '{need}' 열이 없습니다. (헤더 1행 확인)")
+    return col_idx, values[1:]  # 헤더 제외
+
+def _get_all_from_col(rows, col_i):
+    return [(r[col_i] if col_i < len(r) else "").strip() for r in rows]
+
+def _unique_nonempty(items):
+    out, seen = [], set()
+    for s in items:
+        s2 = (s or "").strip()
+        if s2 and s2 not in seen:
+            seen.add(s2); out.append(s2)
+    return out
+
+def _pick_daily_from_col(rows, col_i, seed_key: str):
+    """해당 컬럼에서 '하루 고정(KST)'으로 하나 선택 (seed_key 포함)"""
+    pool = [ (r[col_i] if col_i < len(r) else "").strip() for r in rows ]
+    pool = [p for p in pool if p]
+    if not pool:
+        return ""
+    today_key = _today_kst_str()
+    rnd = random.Random(f"{today_key}|{seed_key}|{len(pool)}")
+    return rnd.choice(pool)
+
+def _find_row_by_name_in_gunbeon(name: str) -> int | None:
+    """'군번' 시트 B열(이름)에서 2행부터 정확 일치하는 행 번호 반환"""
+    sh = ws("군번")
+    colB = sh.col_values(2)
+    tgt = (name or "").strip()
+    for idx, val in enumerate(colB[1:], start=2):  # 2행부터
+        if (val or "").strip() == tgt:
+            return idx
+    return None
+
+def _get_rank_from_gunbeon(name: str) -> str:
+    """'군번' 시트에서 이름에 해당하는 C열(계급) 반환 (없으면 빈문자열)"""
+    sh = ws("군번")
+    row = _find_row_by_name_in_gunbeon(name)
+    if not row:
+        return ""
+    try:
+        return (sh.cell(row, 3).value or "").strip()  # C열 = 계급
+    except Exception:
+        return ""
+
+# ── UI 컴포넌트 ───────────────────────────────────────────────────────
+class FortuneMenuView(View):
+    def __init__(self, owner_id: int, timeout: int = 90):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.add_item(OverallButton())  # 종합(빨강)
+        self.add_item(PersonalButton()) # 개인(파랑)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("이 버튼은 명령어를 사용한 사람만 누를 수 있어요.", ephemeral=True)
+            return False
+        return True
+
+class OverallButton(Button):
+    def __init__(self):
+        super().__init__(label="종합", style=discord.ButtonStyle.danger)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            col, rows = _fortune_sheet_data()
+            ranks = _unique_nonempty(_get_all_from_col(rows, col["계급"]))
+            if not ranks:
+                await interaction.response.send_message(
+                    f"[결과]\n⚠️ '운세' 시트에 '계급' 데이터가 없습니다.\n{now_kst_str()}",
+                    ephemeral=True
+                )
+                return
+
+            # KST 날짜 기반 결정적 셔플 → 하루 동안 동일
+            today_key = _today_kst_str()
+            rnd = random.Random(f"{today_key}|overall|{len(ranks)}")
+            order = ranks[:]
+            rnd.shuffle(order)
+
+            lines = ["오늘의 종합 운세 순위"]
+            for i, rank in enumerate(order, start=1):   # ✅ 전체 랭크 전부 출력
+                lines.append(f"{i}위: {rank}")
+
+            await interaction.response.send_message(
+                "[결과]\n" + "\n".join(lines) + f"\n{now_kst_str()}"
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"[결과]\n❌ 종합 운세 실패: {e}\n{now_kst_str()}",
+                ephemeral=True
+            )
+
+class NameModal(discord.ui.Modal, title="개인 운세"):
+    def __init__(self):
+        super().__init__()
+        self.name_input = discord.ui.TextInput(
+            label="이름을 입력하세요", placeholder="예: 홍길동", required=True, max_length=50
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            name = (self.name_input.value or "").strip()
+            if not name:
+                await interaction.response.send_message(
+                    "[결과]\n⚠️ 이름을 입력하세요.\n" + now_kst_str(), ephemeral=True
+                )
+                return
+
+            # '군번' 시트에서 계급 조회
+            rank = _get_rank_from_gunbeon(name)
+            if not rank:
+                await interaction.response.send_message(
+                    f"[결과]\n❌ '군번' 시트에서 '{name}'의 계급을 찾지 못했습니다.\n{now_kst_str()}",
+                    ephemeral=True
+                )
+                return
+
+            # '운세' 시트에서 하루 고정 랜덤(이름 포함 시드)
+            col, rows = _fortune_sheet_data()
+            fortune = _pick_daily_from_col(rows, col["운세"],        f"{name}|fortune") or "데이터 없음"
+            advice  = _pick_daily_from_col(rows, col["조언"],        f"{name}|advice")  or "데이터 없음"
+            lucky   = _pick_daily_from_col(rows, col["행운 아이템"], f"{name}|lucky")   or "데이터 없음"
+
+            msg = (
+                "[결과]\n"
+                "오늘의 운세 결과\n"
+                f"이름: {name}\n"
+                f"계급: {rank}\n"
+                f"운세: {fortune}\n"
+                f"조언: {advice}\n"
+                f"행운의 아이템: {lucky}\n"
+                f"{now_kst_str()}"
+            )
+            await interaction.response.send_message(msg, ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"[결과]\n❌ 개인 운세 실패: {e}\n{now_kst_str()}",
+                ephemeral=True
+            )
+
+class PersonalButton(Button):
+    def __init__(self):
+        super().__init__(label="개인", style=discord.ButtonStyle.primary)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.send_modal(NameModal())
+        except Exception as e:
+            await interaction.response.send_message(
+                f"[결과]\n❌ 입력창 표시 실패: {e}\n{now_kst_str()}",
+                ephemeral=True
+            )
+
+# ── 명령어: !운세 ────────────────────────────────────────────────────
+@bot.command(name="운세", help="!운세 → [종합](빨강)/[개인](파랑) 버튼 표시 (시트 '운세','군번' 연동, 전체 랭크)")
+async def 운세(ctx):
+    view = FortuneMenuView(owner_id=ctx.author.id)
+    await ctx.send(f"{ctx.author.mention} 운세 메뉴를 선택하세요:", view=view)
+
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
