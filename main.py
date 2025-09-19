@@ -165,15 +165,26 @@ def mark_last_editor(sh, ctx):
         print(f"[WARN] D2 갱신 실패: {e}")
 
 # ───── 군번 유틸 ─────
-def _gunbeon_existing_set(sh):
-    vals = sh.col_values(4)  # D열 전체
-    return {v.strip() for v in vals if v and v.strip()}
-
-def _gen_unique_gunbeon(existing_ids: set, max_tries: int = 2000) -> str | None:
-    for _ in range(max_tries):
-        candidate = f"72{random.randint(0, 999999):06d}"
-        if candidate not in existing_ids:
-            return candidate
+def _find_row_by_exact_name_colB(sh, target: str) -> int | None:
+    """
+    '군번' 시트 B열에서 2행부터 '정확 일치'하는 행 번호 반환.
+    - 정규표현식 정확 일치 ^...$ 사용
+    - 1행(헤더)은 건너뜀
+    """
+    tgt = (target or "").strip()
+    if not tgt:
+        return None
+    try:
+        # gspread의 find + 정규식 정확 일치. B열만 검색.
+        cell = sh.find(f"^{re.escape(tgt)}$", in_column=2, case_sensitive=True, regex=True)
+        if cell and cell.row >= 2:
+            return cell.row
+    except Exception:
+        # find 실패 시 수동 스캔 (fallback)
+        col_vals = sh.col_values(2)
+        for idx, val in enumerate(col_vals[1:], start=2):  # 2행부터
+            if (val or "").strip() == tgt:
+                return idx
     return None
 
 @bot.command(
@@ -183,25 +194,32 @@ def _gen_unique_gunbeon(existing_ids: set, max_tries: int = 2000) -> str | None:
 async def 군번(ctx, 이름: str, 옵션: str = ""):
     try:
         sh = ws("군번")
-        row = None
-        # B열에서 정확 일치
-        col_vals = sh.col_values(2)
-        tgt = (이름 or "").strip()
-        for idx, val in enumerate(col_vals, start=1):
-            if (val or "").strip() == tgt:
-                row = idx
-                break
 
+        # 🔎 B열에서 2행부터 정확 일치로 찾기
+        row = _find_row_by_exact_name_colB(sh, 이름)
         if not row:
             await ctx.send(f"[결과]\n❌ '군번' 시트 B열에서 '{이름}'을(를) 찾지 못했습니다.\n{now_kst_str()}")
             return
 
-        current = (sh.cell(row, 4).value or "").strip()  # D열
+        # 현재 값 확인 (D열=군번)
+        current = (sh.cell(row, 4).value or "").strip()
         force = (옵션 or "").strip().lower() in {"강제", "--force", "force", "재발급"}
 
         if current and not force:
             await ctx.send(f"[결과]\nℹ️ '{이름}'은(는) 이미 군번 `{current}`가 있습니다.\n{now_kst_str()}")
             return
+
+        # 중복 방지용 집합
+        def _gunbeon_existing_set(sheet):
+            vals = sheet.col_values(4)
+            return {v.strip() for v in vals if v and v.strip()}
+
+        def _gen_unique_gunbeon(existing_ids: set, max_tries: int = 2000) -> str | None:
+            for _ in range(max_tries):
+                cand = f"72{random.randint(0, 999999):06d}"
+                if cand not in existing_ids:
+                    return cand
+            return None
 
         existing = _gunbeon_existing_set(sh)
         if current in existing:
@@ -212,8 +230,15 @@ async def 군번(ctx, 이름: str, 옵션: str = ""):
             await ctx.send(f"[결과]\n❌ 군번 생성 실패: 잠시 후 다시 시도해 주세요.\n{now_kst_str()}")
             return
 
-        sh.update_cell(row, 4, new_id)  # D열 기입
-        mark_last_editor(sh, ctx)
+        # ✍️ 텍스트로 고정하여 기록(숫자/전화번호 자동변환 방지)
+        # gspread update: 범위 업데이트로 USER_ENTERED 적용
+        sh.update(f"D{row}", [[f"'{new_id}"]])  # 앞의 ' 는 표시되진 않고 "텍스트로 입력" 처리됨
+
+        # 최종 수정자
+        try:
+            sh.update_acell("D2", getattr(ctx.author, "display_name", "unknown"))
+        except Exception as e:
+            print(f"[WARN] D2 갱신 실패: {e}")
 
         if force and current:
             await ctx.send(f"[결과]\n✅ '{이름}' 군번 재발급 완료: `{current}` → `{new_id}`\n{now_kst_str()}")
